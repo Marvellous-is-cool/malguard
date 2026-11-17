@@ -1,0 +1,38 @@
+# The reusable malguard gate. Projects call it with
+#   uses: Marvellous-is-cool/malguard/.github/workflows/scan.yml@v1
+# and make their deploy jobs need it. See README.md.
+name: malguard scan
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Directory to scan, relative to the repository root.
+        type: string
+        required: false
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  malguard:
+    name: malguard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # The scanned code must never be able to push with the job's token.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scan for malware
+        uses: Marvellous-is-cool/malguard@v1
+        with:
+          path: ${{ inputs.path }}

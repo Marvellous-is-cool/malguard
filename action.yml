@@ -1,0 +1,36 @@
+name: malguard
+description: >-
+  Fail the job when the repository contains developer-targeted malware or a
+  known-malicious dependency. Runs the scanner shipped with this action
+  version, so every project on the same tag applies the same rules.
+author: Marvellous-is-cool
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  path:
+    description: Directory to scan, relative to the workspace.
+    required: false
+    default: "."
+  allow-file:
+    description: Exceptions file, relative to the workspace. Defaults to <path>/.malguard-allow.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Scan for malware
+      shell: bash
+      env:
+        MALGUARD_PATH: ${{ inputs.path }}
+        MALGUARD_ALLOW: ${{ inputs.allow-file }}
+        MALGUARD_HOME: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        args=("$MALGUARD_PATH")
+        if [ -n "$MALGUARD_ALLOW" ]; then
+          args+=(--allow "$MALGUARD_ALLOW")
+        fi
+        python3 "$MALGUARD_HOME/malguard_scan.py" "${args[@]}"
