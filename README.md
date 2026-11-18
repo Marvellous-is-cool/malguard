@@ -21,6 +21,7 @@ on folder open executed a "font" file that was really JavaScript.
 | Worm artifacts | Auto-push batch files; a `.gitignore` that hides itself | HIGH |
 | Hidden code | Long runs of invisible Unicode; code pushed far right behind whitespace; `exec` of decoded Python | HIGH |
 | Obfuscation | JavaScript obfuscator patterns (HIGH in build config files) | MEDIUM |
+| Encoded payloads | A string of 200+ base64 characters that's close to random (5+ bits per character): a payload with no known signature. Lockfiles and `.min.` files are skipped. So are embedded images, fonts, audio and inline source maps, but only when the decoded data really starts with that format's file signature | MEDIUM |
 | Risky install scripts | `preinstall`/`postinstall`/`prepare` scripts that download or run code | HIGH |
 | Malicious dependencies | Any npm or PyPI package in a lockfile or manifest that OSV lists as malicious (`MAL-*`), plus known hijacked releases | HIGH |
 
@@ -225,8 +226,14 @@ Rules live in `malguard_scan.py`; tests live in `tests/`.
    ```
 
    Every project on `@v1` uses the new rules from its next run.
-6. **Breaking change?** A change that would fail projects that pass today
-   gets a new major tag (`v2`). Projects then move to it deliberately.
+6. **Which version number?**
+   - **New rules are minor releases** (`v1.1.0`). A new rule may fail a
+     project that passed before. That's its job when the project has a real
+     problem, and a reviewed false positive goes in `.malguard-allow`.
+   - **Fixes are patch releases** (`v1.0.2`).
+   - **A breaking change gets a new major tag** (`v2`), and projects move to it
+     deliberately. That's any change to how projects call malguard: workflow
+     inputs, the check name, exit codes or the `.malguard-allow` format.
 
 **Before moving `v1`:** a new rule can turn every project red at once.
 Scan your projects with the new version first:

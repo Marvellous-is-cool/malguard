@@ -23,16 +23,20 @@ Usage:
   --offline  skip the OSV lookup (local experiments only; CI never passes it)
 """
 
+import base64
+import binascii
 import fnmatch
 import json
+import math
 import os
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/{id}"
@@ -69,6 +73,47 @@ OBF_JS = re.compile(r"_0x[0-9a-f]{4,}\(|global\[['\"](\\u00[0-9a-fA-F]{2}|!)['\"
                     r"require\(['\"](node:)?child_process['\"]\)\.exec\(")
 OBF_PY = re.compile(r"exec\((base64|zlib|marshal|bytes\.fromhex|codecs\.decode|__import__)|marshal\.loads\(|"
                     r"b64decode\(['\"][A-Za-z0-9+/=]{300,}")
+
+# Encoded payloads with no known signature: a long, unbroken run of base64 or
+# base64url characters whose Shannon entropy is close to random. Base64 of
+# compressed or encrypted data sits near 6 bits per character; code, words,
+# paths and hex strings (at most 4 bits) stay well below the threshold.
+ENTROPY_MIN_LENGTH = 200
+ENTROPY_MIN_BITS = 5.0
+ENCODED_RUN = re.compile(r"[A-Za-z0-9+/_-]{%d,}={0,2}" % ENTROPY_MIN_LENGTH)
+# Embedded media, fonts and inline source maps are legitimately high-entropy.
+# One is exempt only when its data: URI names the type AND the decoded bytes
+# start with that format's own signature, so labelling a payload
+# "data:image/png" doesn't hide it. Any other data: URI is still checked.
+DATA_URI_BEFORE = re.compile(r"(sourceMappingURL=)?data:([\w.+-]+/[\w.+-]+)(?:;[\w.=-]+)*;base64,$", re.I)
+_TTF = ((0, b"\x00\x01\x00\x00"), (0, b"true"))
+_OTF = ((0, b"OTTO"),)
+_WOFF = ((0, b"wOFF"),)
+_WOFF2 = ((0, b"wOF2"),)
+_ICO = ((0, b"\x00\x00\x01\x00"),)
+MEDIA_SIGNATURES = {
+    "image/png": ((0, b"\x89PNG\r\n\x1a\n"),),
+    "image/jpeg": ((0, b"\xff\xd8\xff"),), "image/jpg": ((0, b"\xff\xd8\xff"),),
+    "image/gif": ((0, b"GIF87a"), (0, b"GIF89a")),
+    "image/webp": ((8, b"WEBP"),),
+    "image/avif": ((4, b"ftypavi"),),
+    "image/bmp": ((0, b"BM"),),
+    "image/x-icon": _ICO, "image/vnd.microsoft.icon": _ICO,
+    "font/woff": _WOFF, "application/font-woff": _WOFF, "application/x-font-woff": _WOFF,
+    "font/woff2": _WOFF2, "application/font-woff2": _WOFF2, "application/x-font-woff2": _WOFF2,
+    "font/ttf": _TTF, "application/x-font-ttf": _TTF, "application/x-font-truetype": _TTF,
+    "font/otf": _OTF, "application/x-font-opentype": _OTF, "application/x-font-otf": _OTF,
+    "font/sfnt": _TTF + _OTF,
+    "application/vnd.ms-fontobject": ((34, b"LP"),),
+    "audio/mpeg": ((0, b"ID3"), (0, b"\xff\xfb"), (0, b"\xff\xf3"), (0, b"\xff\xf2")),
+    "audio/wav": ((8, b"WAVE"),), "audio/x-wav": ((8, b"WAVE"),),
+    "audio/ogg": ((0, b"OggS"),), "video/mp4": ((4, b"ftyp"),), "video/webm": ((0, b"\x1a\x45\xdf\xa3"),),
+}
+# Text formats: the decoded start, after a byte-order mark or whitespace.
+TEXT_DATA_STARTS = {"image/svg+xml": (b"<",)}
+# Lockfiles are full of integrity hashes and are checked by the dependency
+# scan instead.
+ENTROPY_SKIP_FILES = {"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "composer.lock"}
 
 # Signatures of known developer-targeting loaders (PolinRider, EtherHiding,
 # BeaverTail, Shai-Hulud, GlassWorm). Each literal marker has one character
@@ -142,6 +187,51 @@ def read_text(path, limit=MAX_TEXT_BYTES):
     return raw.decode("utf-8", "ignore")
 
 
+def shannon_bits(text):
+    """Shannon entropy of text, in bits per character."""
+
+    counts = Counter(text)
+    total = len(text)
+    return -sum(n / total * math.log2(n / total) for n in counts.values())
+
+
+def is_genuine_embedded_media(text, start, run):
+    """Is this run the body of an embedded image, font, media file or source map?
+
+    True only when the data: URI just before it names a known type and the
+    decoded bytes really start with that type's signature.
+    """
+
+    uri = DATA_URI_BEFORE.search(text, max(0, start - 160), start)
+    if not uri:
+        return False
+    source_map, mime = uri.group(1), uri.group(2).lower()
+    head = run[:64]
+    try:
+        raw = base64.b64decode(head[:len(head) // 4 * 4], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    if source_map:
+        return mime == "application/json" and raw.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"{")
+    if mime in TEXT_DATA_STARTS:
+        return raw.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(TEXT_DATA_STARTS[mime])
+    return any(raw[offset:offset + len(magic)] == magic for offset, magic in MEDIA_SIGNATURES.get(mime, ()))
+
+
+def high_entropy_runs(text):
+    """[(line, length, bits)] for each run that looks like an encoded payload."""
+
+    hits = []
+    for m in ENCODED_RUN.finditer(text):
+        run = m.group(0)
+        if is_genuine_embedded_media(text, m.start(), run):
+            continue
+        bits = shannon_bits(run)
+        if bits >= ENTROPY_MIN_BITS:
+            hits.append((text.count("\n", 0, m.start()) + 1, len(run), bits))
+    return hits
+
+
 def scan_file(root, rel):
     """Every finding for one file (path relative to the repository root)."""
 
@@ -194,6 +284,13 @@ def scan_file(root, rel):
             m = OBF_PY.search(text)
             if m:
                 out.append(Finding("HIGH", rel, f"python exec/decode of hidden code: {m.group(0)[:40]}"))
+        if name not in ENTROPY_SKIP_FILES:
+            runs = high_entropy_runs(text)
+            if runs:
+                line, length, bits = runs[0]
+                more = f"; {len(runs) - 1} more in this file" if len(runs) > 1 else ""
+                out.append(Finding("MEDIUM", rel, f"high-entropy string at line {line} ({length} chars, "
+                                                   f"{bits:.1f} bits/char), possibly an encoded payload{more}"))
     if name == "package.json" and "node_modules" not in rel:
         try:
             scripts = json.loads(text).get("scripts") or {}

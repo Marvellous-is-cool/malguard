@@ -1,8 +1,32 @@
 # Changelog
 
 Every release of malguard. Versions follow [Semantic Versioning](https://semver.org):
-a patch or minor release never fails a project that passed the release before.
-A change that would gets a new major version.
+
+- **Minor releases add rules.** A new rule can fail a project that passed
+  before, if the project has a real problem or a false positive to excuse.
+- **Patch releases fix bugs.**
+- **Major releases change how projects call malguard:** workflow inputs, the
+  check name, exit codes or the `.malguard-allow` format.
+
+## [1.1.0] - unreleased
+
+### Added
+
+- **Entropy detection.** A string of 200+ base64 or base64url characters
+  with 5 or more bits of entropy per character is a MEDIUM heuristic finding.
+  It means a likely encoded payload with no known signature.
+  - It applies to the same code and config files as the other heuristics.
+  - The finding names the line, the length and the entropy.
+  - Exempt: npm, pnpm and Composer lockfiles, and `.min.` files.
+  - Also exempt: embedded images, fonts, audio and inline source maps. Only
+    when the `data:` URI names the type and the decoded bytes start with that
+    format's file signature, so labelling a payload `data:image/png` doesn't
+    hide it.
+  - Like every heuristic, it can be excused in `.malguard-allow`.
+
+### Changed
+
+- The versioning policy above now says what each kind of release may do.
 
 ## [1.0.1] - unreleased
 
