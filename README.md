@@ -42,6 +42,21 @@ and `Pipfile.lock`.
 OSV service and an unreadable exceptions file. A scan that didn't happen is
 never treated as clean.
 
+## Limitations
+
+- **It's a gate, not a sandbox or an antivirus.** It detects known campaigns
+  and the common tricks they use.
+- **Most rules are text patterns.** Code written specifically to evade them
+  can get through.
+- **Dependency checks rely on OSV's malicious-package data.** A package that
+  hasn't been reported yet isn't flagged until it is. The daily scan catches
+  it then.
+- **Only npm and PyPI dependencies are checked.** Files in any language are
+  still scanned.
+- **It reads the files and manifests in the checked-out tree.** It doesn't
+  run install scripts, watch runtime behaviour or read git history.
+- **It doesn't replace code review.**
+
 ## Use it in a project
 
 ### 1. Add the workflow
