@@ -5,9 +5,11 @@ file never contains a real signature: committing it must not trip malguard,
 locally or in CI. Run with: python3 -m unittest discover -s tests
 """
 
+import base64
 import io
 import json
 import os
+import random
 import sys
 import tempfile
 import unittest
@@ -139,6 +141,124 @@ class Detections(unittest.TestCase):
 
     def test_obfuscation_in_a_build_config_is_high(self):
         self.assert_flags({"vite.config.js": j("eval(at", "ob('x'))")}, "HIGH", "vite.config.js", "obfuscation")
+
+
+def random_b64(n_bytes, seed=1, urlsafe=False):
+    """Base64 of random bytes, made at test time: never a committed fixture."""
+    rng = random.Random(seed)
+    raw = bytes(rng.getrandbits(8) for _ in range(n_bytes))
+    return (base64.urlsafe_b64encode if urlsafe else base64.b64encode)(raw).decode()
+
+
+class Entropy(unittest.TestCase):
+    PAYLOAD = random_b64(300)  # 400 characters, about 5.8 bits each
+
+    def entropy_findings(self, files):
+        failures, _, _, _ = scan(files)
+        return [f for f in failures if "high-entropy string" in f.message]
+
+    def test_an_encoded_payload_in_code_is_flagged(self):
+        for rel in ("src/loader.js", "tools/setup.py", "config/app.json", "deploy.yml", "run.sh"):
+            with self.subTest(rel=rel):
+                hits = self.entropy_findings({rel: f'const blob = "{self.PAYLOAD}";\n'})
+                self.assertEqual(len(hits), 1, hits)
+                self.assertEqual((hits[0].severity, hits[0].kind, hits[0].path), ("MEDIUM", mg.HEURISTIC, rel))
+
+    def test_base64url_payloads_are_flagged_too(self):
+        hits = self.entropy_findings({"a.js": f"x = '{random_b64(300, seed=2, urlsafe=True)}'\n"})
+        self.assertEqual(len(hits), 1, hits)
+
+    def test_the_finding_gives_the_line_and_counts_the_rest(self):
+        text = f"a();\nb();\nconst p = '{self.PAYLOAD}';\nconst q = '{random_b64(300, seed=3)}';\n"
+        hits = self.entropy_findings({"a.js": text})
+        self.assertEqual(len(hits), 1, hits)
+        self.assertIn("line 3 (400 chars", hits[0].message)
+        self.assertIn("1 more in this file", hits[0].message)
+
+    def test_an_encoded_payload_can_be_excused(self):
+        failures, excused, _, _ = scan(
+            {"vendor/blob.js": f"x = '{self.PAYLOAD}'\n"},
+            allow="vendor/blob.js :: high-entropy string :: licensed WASM blob, reviewed 2026-11-18\n")
+        self.assertEqual(failures, [])
+        self.assertEqual(len(excused), 1)
+
+    def test_a_run_just_under_the_minimum_length_is_not_flagged(self):
+        short = self.PAYLOAD[:mg.ENTROPY_MIN_LENGTH - 1]
+        self.assertEqual(self.entropy_findings({"a.js": f"x = '{short}'\n"}), [])
+        exact = self.PAYLOAD[:mg.ENTROPY_MIN_LENGTH]
+        self.assertEqual(len(self.entropy_findings({"a.js": f"x = '{exact}'\n"})), 1)
+
+    def test_long_low_entropy_runs_are_not_flagged(self):
+        rng = random.Random(4)
+        cases = {
+            "hex.js": "const h = '" + "".join(rng.choice("0123456789abcdef") for _ in range(1000)) + "';\n",
+            "pad.js": "const p = '" + "A" * 1000 + "';\n",
+            "words.js": "const w = '" + "-".join(["module", "route", "handler"] * 60) + "';\n",
+            "path.py": "P = '" + "/".join(["src", "components", "shared", "Button"] * 30) + "'\n",
+        }
+        self.assertEqual(self.entropy_findings(cases), [])
+
+    def test_ordinary_and_minified_code_is_not_flagged(self):
+        rng = random.Random(5)
+        names = ["".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rng.randint(1, 3)))
+                 for _ in range(400)]
+        bundle = ";".join(f"function {a}({b},{c}){{return {b}.{c}+{a}({c})}}"
+                          for a, b, c in zip(names, names[1:], names[2:]))
+        self.assertEqual(self.entropy_findings({
+            "src/bundle.js": bundle + "\n",
+            "src/app.ts": "export const add = (a: number, b: number): number => a + b;\n" * 50,
+        }), [])
+
+    def test_files_skipped_by_name_are_not_flagged(self):
+        lock = json.dumps({"packages": {"node_modules/x": {"version": "1.0.0", "resolved": self.PAYLOAD}}})
+        self.assertEqual(self.entropy_findings({
+            "package-lock.json": lock,
+            "pnpm-lock.yaml": f"x:\n  resolution: {{tarball: {self.PAYLOAD}}}\n",
+            "static/vendor.min.js": f"x='{self.PAYLOAD}'\n",
+            "notes.md": f"{self.PAYLOAD}\n",
+        }), [])
+
+    @staticmethod
+    def media(header, seed=6):
+        """Base64 of a file that starts with a real format signature."""
+        rng = random.Random(seed)
+        return base64.b64encode(header + bytes(rng.getrandbits(8) for _ in range(300))).decode()
+
+    def test_genuine_embedded_media_and_source_maps_are_exempt(self):
+        eot = bytes(34) + b"LP"
+        source_map = self.media(b'{"version":3,')
+        cases = {
+            "logo.js": f"const src = 'data:image/png;base64,{self.media(bytes.fromhex('89504e470d0a1a0a'))}';\n",
+            "photo.ts": f"img.src = 'data:image/jpeg;base64,{self.media(bytes.fromhex('ffd8ffe0'))}';\n",
+            "icon.js": f"x = 'data:image/svg+xml;base64,{self.media(b' <svg xmlns=1>')}'\n",
+            "font.ts": f"const f = 'data:font/woff2;charset=utf-8;base64,{self.media(b'wOF2')}';\n",
+            "legacy.js": f"url(data:application/x-font-woff;base64,{self.media(b'wOFF')})\n",
+            "ie.js": f"url(data:application/vnd.ms-fontobject;base64,{self.media(eot)})\n",
+            "beep.js": f"new Audio('data:audio/mpeg;base64,{self.media(b'ID3')}')\n",
+            "out.js": f"run();\n//# sourceMappingURL=data:application/json;charset=utf-8;base64,{source_map}\n",
+        }
+        self.assertEqual(self.entropy_findings(cases), [])
+
+    def test_a_payload_labelled_as_media_is_still_flagged(self):
+        cases = {
+            "fake-png.js": f"x = 'data:image/png;base64,{self.PAYLOAD}'\n",
+            "fake-font.js": f"x = 'data:font/woff2;base64,{self.PAYLOAD}'\n",
+            "fake-svg.js": f"x = 'data:image/svg+xml;base64,{self.PAYLOAD}'\n",
+            "fake-map.js": f"//# sourceMappingURL=data:application/json;base64,{self.PAYLOAD}\n",
+            "unknown.js": f"x = 'data:image/x-made-up;base64,{self.media(b'wOF2')}'\n",
+        }
+        hits = self.entropy_findings(cases)
+        self.assertEqual(sorted(f.path for f in hits), sorted(cases), hits)
+
+    def test_a_script_data_uri_is_still_flagged(self):
+        hits = self.entropy_findings({"a.js": f"import('data:text/javascript;base64,{self.PAYLOAD}')\n"})
+        self.assertEqual(len(hits), 1, hits)
+
+    def test_integrity_hashes_are_too_short_to_flag_and_cannot_hide_a_payload(self):
+        sri = "sha512-" + random_b64(64, seed=7)  # a real SRI hash: 95 characters
+        self.assertEqual(self.entropy_findings({"a.js": f"integrity: '{sri}'\n"}), [])
+        hits = self.entropy_findings({"b.js": f"integrity: 'sha512-{self.PAYLOAD}'\n"})
+        self.assertEqual(len(hits), 1, hits)
 
 
 class Exceptions(unittest.TestCase):
