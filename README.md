@@ -185,6 +185,11 @@ Scan your projects with the new version first:
 python3 malguard_scan.py ~/code/<project>
 ```
 
+## Report a bypass
+
+Found a way past malguard, or malware it missed? Report it privately, not in
+a public issue. [SECURITY.md](SECURITY.md) says how and what happens next.
+
 ## Layout
 
 | Path | What |
@@ -195,6 +200,7 @@ python3 malguard_scan.py ~/code/<project>
 | `.github/workflows/self-test.yml` | This repo's own CI |
 | `examples/malguard.yml` | The workflow to copy into a project |
 | `tests/` | Self-tests |
+| `SECURITY.md` | How to report a bypass privately |
 
 ## License
 
