@@ -1,6 +1,12 @@
 # The reusable malguard gate. Projects call it with
 #   uses: Marvellous-is-cool/malguard/.github/workflows/scan.yml@v1
+# or pinned to a commit:
+#   uses: Marvellous-is-cool/malguard/.github/workflows/scan.yml@<sha> # v1.0.1
 # and make their deploy jobs need it. See README.md.
+#
+# The scanner always runs from the same malguard commit as this workflow
+# file (job.workflow_sha), so a caller who pins this workflow to a SHA also
+# pins every rule it runs. Nothing here refers to a moving tag.
 name: malguard scan
 
 on:
@@ -21,18 +27,55 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Without its own commit, this workflow can't promise to run the rules
+      # the caller pinned, so it stops instead of guessing. (GitHub Enterprise
+      # Server doesn't provide job.workflow_sha.)
+      - name: Find this workflow's malguard commit
+        env:
+          WORKFLOW_REPO: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_REPO" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error title=malguard::Can't tell which malguard commit this workflow came from (job.workflow_sha is empty). Failing closed."
+            exit 2
+          fi
+          echo "malguard: running the scanner from $WORKFLOW_REPO@$WORKFLOW_SHA"
+
+      # malguard is fetched first and moved out of the workspace, so the
+      # project checkout below starts clean and the scan never includes it.
+      - name: Check out malguard at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .malguard-scanner
+          persist-credentials: false
+
+      - name: Move malguard out of the workspace
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          MALGUARD_HOME: ${{ runner.temp }}/malguard
+        run: |
+          mv .malguard-scanner "$MALGUARD_HOME"
+          actual="$(git -C "$MALGUARD_HOME" rev-parse HEAD)"
+          if [ "$actual" != "$WORKFLOW_SHA" ]; then
+            echo "::error title=malguard::Checked out malguard $actual, expected $WORKFLOW_SHA. Failing closed."
+            exit 2
+          fi
+
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The scanned code must never be able to push with the job's token.
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Scan for malware
-        uses: Marvellous-is-cool/malguard@v1
-        with:
-          path: ${{ inputs.path }}
+        env:
+          MALGUARD_HOME: ${{ runner.temp }}/malguard
+          MALGUARD_PATH: ${{ inputs.path }}
+        run: python3 "$MALGUARD_HOME/malguard_scan.py" "$MALGUARD_PATH"

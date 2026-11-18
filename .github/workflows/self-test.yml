@@ -1,5 +1,6 @@
 # malguard's own CI: the scanner's tests, then the scanner run on this repo
-# through the action exactly as projects run it.
+# twice, the two ways projects run it: through the action, and through the
+# reusable workflow (which fetches the scanner at its own commit).
 name: self-test
 
 on:
@@ -14,31 +15,39 @@ permissions:
 jobs:
   test:
     name: tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: it moves to Ubuntu 26.04, which has no Python 3.9
+    # build, and 3.9 is the oldest version the scanner supports.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       matrix:
         python: ["3.9", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests
         run: python -m unittest discover -s tests -v
 
   scan-self:
-    name: malguard (this repo)
+    name: malguard (this repo, action)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Scan this repo with the action at this commit
         uses: ./
+
+  # Proves the pinning path: the reusable workflow must fetch the scanner at
+  # this commit (job.workflow_sha), or its own SHA check fails the job.
+  scan-self-workflow:
+    name: malguard (this repo, reusable workflow)
+    uses: ./.github/workflows/scan.yml
