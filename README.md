@@ -73,6 +73,41 @@ It runs on:
 - **Once a day.** It catches a dependency that was declared malicious after
   it was merged.
 
+#### Pin to a commit SHA
+
+`@v1` is the easy option: you get new rules as soon as they're released.
+The trade-off is that `v1` is a tag that moves, so a change to malguard
+reaches your CI without passing your review.
+
+To review every change first, pin the workflow to a release's commit SHA:
+
+```yaml
+jobs:
+  malguard:
+    uses: Marvellous-is-cool/malguard/.github/workflows/scan.yml@<sha> # v1.0.1
+```
+
+Pinning the workflow pins the scanner too. The workflow runs the scanner from
+its own commit, never from a tag. This holds from v1.0.1 onwards. v1.0.0's
+workflow still fetched the scanner by `@v1`.
+
+Let Dependabot keep the pin current. It opens a pull request for each new
+release, updating the SHA and the version comment together. Add
+`.github/dependabot.yml`:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+```
+
+The scan workflow needs `job.workflow_sha`, which GitHub Enterprise Server
+doesn't provide. There the job fails closed rather than guess which scanner
+to run.
+
 ### 2. Gate your deploys
 
 A deploy must never run on a tree malguard hasn't passed. In every workflow
