@@ -15,7 +15,9 @@ permissions:
 jobs:
   test:
     name: tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: it moves to Ubuntu 26.04, which has no Python 3.9
+    # build, and 3.9 is the oldest version the scanner supports.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       matrix:
